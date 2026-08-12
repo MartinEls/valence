@@ -5,14 +5,19 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 PAGE_SIZE = 100
 
-# CDN libs: 2D from SMILES (SmilesDrawer), 3D from XYZ (3Dmol.js)
-SMILES_DRAWER_JS = "https://unpkg.com/smiles-drawer@2.1.7/dist/smiles-drawer.min.js"
+# CDN: 3D from XYZ (3Dmol.js). 2D is pre-rendered with openbabel at build time.
 MOL3D_JS = "https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.4.2/3Dmol-min.js"
+
+_SVG_DECL_RE = re.compile(r"<\?xml[^?]*\?>", re.IGNORECASE)
+_SVG_DOCTYPE_RE = re.compile(r"<!DOCTYPE[^>]*>", re.IGNORECASE)
 
 
 def load_results(path: Path) -> list[dict]:
@@ -21,7 +26,7 @@ def load_results(path: Path) -> list[dict]:
     if not text:
         return []
 
-    if path.suffix.lower() == ".jsonl" or "\n" in text and not text.lstrip().startswith("["):
+    if path.suffix.lower() == ".jsonl" or ("\n" in text and not text.lstrip().startswith("[")):
         rows: list[dict] = []
         for i, line in enumerate(text.splitlines(), start=1):
             line = line.strip()
@@ -43,14 +48,95 @@ def load_results(path: Path) -> list[dict]:
     raise ValueError(f"Unsupported JSON structure in {path}")
 
 
+def smiles_to_svg(smiles: str, *, size: int = 200) -> str | None:
+    """Render a SMILES string to an inline-ready SVG via openbabel."""
+    if not smiles or not smiles.strip():
+        return None
+    obabel = shutil.which("obabel")
+    if not obabel:
+        return None
+    try:
+        proc = subprocess.run(
+            [obabel, "-ismi", "-osvg", "-d"],  # -d: delete hydrogens for cleaner 2D
+            input=smiles.strip() + "\n",
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    svg = (proc.stdout or "").strip()
+    if proc.returncode != 0 or "<svg" not in svg.lower():
+        # Retry without -d (some edge cases)
+        try:
+            proc = subprocess.run(
+                [obabel, "-ismi", "-osvg"],
+                input=smiles.strip() + "\n",
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        svg = (proc.stdout or "").strip()
+        if proc.returncode != 0 or "<svg" not in svg.lower():
+            return None
+
+    return _prepare_inline_svg(svg, size=size)
+
+
+def _prepare_inline_svg(svg: str, *, size: int = 200) -> str:
+    """Strip XML decl and force square dimensions for the table cell."""
+    svg = _SVG_DECL_RE.sub("", svg)
+    svg = _SVG_DOCTYPE_RE.sub("", svg).strip()
+
+    # Keep a white canvas so openbabel's black bonds / CPK labels stay readable
+    # (do not restyle fill="white" to the dark page background).
+
+    # Normalize outer svg width/height
+    if re.search(r"<svg\b", svg, re.IGNORECASE):
+        svg = re.sub(
+            r"(<svg\b)([^>]*)(>)",
+            lambda m: m.group(1)
+            + _force_svg_size_attrs(m.group(2), size)
+            + m.group(3),
+            svg,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return svg
+
+
+def _force_svg_size_attrs(attrs: str, size: int) -> str:
+    attrs = re.sub(r'\swidth="[^"]*"', "", attrs)
+    attrs = re.sub(r"\swidth='[^']*'", "", attrs)
+    attrs = re.sub(r'\sheight="[^"]*"', "", attrs)
+    attrs = re.sub(r"\sheight='[^']*'", "", attrs)
+    return f'{attrs} width="{size}" height="{size}" class="view-2d-svg"'
+
+
+def enrich_with_2d(rows: list[dict]) -> list[dict]:
+    """Add svg_2d field to each row using openbabel depictions."""
+    enriched: list[dict] = []
+    for r in rows:
+        item = dict(r)
+        item["svg_2d"] = smiles_to_svg(str(r.get("smiles") or ""))
+        enriched.append(item)
+    return enriched
+
+
 def build_html(rows: list[dict], *, page_size: int = PAGE_SIZE, title: str = "QM9 results") -> str:
     """Render a self-contained HTML report with 2D/3D viewers and pagination."""
+    # Keep full geometry in payload for 3D; svg_2d is used client-side as HTML string
     payload = json.dumps(rows, ensure_ascii=False)
-    # Prevent </script> breakouts inside embedded JSON
     payload = payload.replace("<", "\\u003c")
 
     n = len(rows)
-    n_pages = max(1, (n + page_size - 1) // page_size) if n else 1
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -58,7 +144,6 @@ def build_html(rows: list[dict], *, page_size: int = PAGE_SIZE, title: str = "QM
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>{html.escape(title)}</title>
-<script src="{SMILES_DRAWER_JS}"></script>
 <script src="{MOL3D_JS}"></script>
 <style>
   :root {{
@@ -167,14 +252,25 @@ def build_html(rows: list[dict], *, page_size: int = PAGE_SIZE, title: str = "QM
     border: 1px solid var(--border);
     overflow: hidden;
   }}
-  .viewer-wrap canvas, .viewer-wrap svg {{
-    display: block;
-  }}
-  .view-2d, .view-3d {{
+  .view-2d {{
     width: 100%;
     height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #ffffff;
   }}
-  .view-3d {{ position: relative; }}
+  .view-2d svg, .view-2d-svg {{
+    width: 100% !important;
+    height: 100% !important;
+    display: block;
+    background: #ffffff;
+  }}
+  .view-3d {{
+    width: 100%;
+    height: 100%;
+    position: relative;
+  }}
   .placeholder {{
     display: flex;
     align-items: center;
@@ -224,7 +320,7 @@ def build_html(rows: list[dict], *, page_size: int = PAGE_SIZE, title: str = "QM
 <body>
 <header>
   <h1>{html.escape(title)}</h1>
-  <div class="meta">{n} entries · page size {page_size} · 2D from SMILES · 3D from XYZ (obabel / xtb)</div>
+  <div class="meta">{n} entries · page size {page_size} · 2D via openbabel SVG · 3D via 3Dmol (obabel / xtb XYZ)</div>
   <div class="pager" id="pager">
     <button type="button" id="prev-btn" aria-label="Previous page">← Prev</button>
     <div id="page-buttons"></div>
@@ -259,11 +355,7 @@ def build_html(rows: list[dict], *, page_size: int = PAGE_SIZE, title: str = "QM
 
   let page = 0;
   const nPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE) || 1);
-  const drawer = (typeof SmilesDrawer !== "undefined")
-    ? new SmilesDrawer.Drawer({{ width: 210, height: 210, bondThickness: 1.2 }})
-    : null;
-
-  const viewers3d = new Map(); // element id -> $3Dmol viewer
+  const viewers3d = new Map();
 
   function esc(s) {{
     return String(s == null ? "" : s)
@@ -297,64 +389,39 @@ def build_html(rows: list[dict], *, page_size: int = PAGE_SIZE, title: str = "QM
         ? '<div class="energy">E = ' + esc(Number(r.energy).toFixed(6)) + " Eh</div>"
         : "";
 
-      const id2d = "smi-" + idx;
       const idOb = "ob3d-" + idx;
       const idXt = "xt3d-" + idx;
+
+      const svg2d = r.svg_2d
+        ? '<div class="view-2d">' + r.svg_2d + "</div>"
+        : '<div class="placeholder">No 2D depiction</div>';
 
       tr.innerHTML =
         '<td class="id">' + esc(id) + "<br/>" + badge + "</td>" +
         '<td class="smiles" title="' + esc(smiles) + '">' + esc(smiles) + "</td>" +
-        '<td><div class="viewer-wrap" data-kind="2d" data-smiles="' + esc(smiles) + '" data-inchi="' + esc(r.inchi_start || "") + '">' +
-          '<canvas class="view-2d" id="' + id2d + '" width="210" height="210"></canvas>' +
+        '<td><div class="viewer-wrap" data-kind="2d">' +
+          svg2d +
           inchiOverlay(r.inchi_start) +
         "</div></td>" +
-        '<td><div class="viewer-wrap" data-kind="3d" data-xyz-key="obabel_geometry" id="wrap-' + idOb + '">' +
+        '<td><div class="viewer-wrap" data-kind="3d" id="wrap-' + idOb + '">' +
           '<div class="view-3d" id="' + idOb + '"></div>' +
           inchiOverlay(r.inchi_obabel) +
         "</div></td>" +
-        '<td><div class="viewer-wrap" data-kind="3d" data-xyz-key="optimized_geometry" id="wrap-' + idXt + '">' +
+        '<td><div class="viewer-wrap" data-kind="3d" id="wrap-' + idXt + '">' +
           '<div class="view-3d" id="' + idXt + '"></div>' +
           inchiOverlay(r.inchi_xtb) +
         "</div>" + energy + "</td>";
 
-      // stash xyz on elements after insert
       frag.appendChild(tr);
     }});
     tbody.appendChild(frag);
 
-    // Attach XYZ payloads (avoid huge attribute strings with HTML-escaping issues)
+    // Attach XYZ payloads (avoid huge HTML attributes)
     rows.forEach((r, idx) => {{
       const ob = document.getElementById("ob3d-" + idx);
       const xt = document.getElementById("xt3d-" + idx);
       if (ob) ob.dataset.xyz = r.obabel_geometry || "";
       if (xt) xt.dataset.xyz = r.optimized_geometry || "";
-    }});
-  }}
-
-  function render2dVisible() {{
-    if (!drawer) return;
-    tbody.querySelectorAll("tr.data-row:not(.row-hidden) .viewer-wrap[data-kind='2d']").forEach((wrap) => {{
-      if (wrap.dataset.drawn === "1") return;
-      const smiles = wrap.dataset.smiles || "";
-      const canvas = wrap.querySelector("canvas");
-      if (!smiles || !canvas) {{
-        wrap.innerHTML = '<div class="placeholder">No SMILES</div>' + wrap.querySelector(".inchi-overlay")?.outerHTML;
-        wrap.dataset.drawn = "1";
-        return;
-      }}
-      SmilesDrawer.parse(
-        smiles,
-        (tree) => {{
-          drawer.draw(tree, canvas, "dark", false);
-          wrap.dataset.drawn = "1";
-        }},
-        () => {{
-          const ov = wrap.querySelector(".inchi-overlay");
-          wrap.innerHTML = '<div class="placeholder">2D draw failed</div>';
-          if (ov) wrap.appendChild(ov);
-          wrap.dataset.drawn = "1";
-        }}
-      );
     }});
   }}
 
@@ -400,11 +467,7 @@ def build_html(rows: list[dict], *, page_size: int = PAGE_SIZE, title: str = "QM
     pageButtons.querySelectorAll("button[data-page]").forEach((b) => {{
       b.classList.toggle("active", Number(b.dataset.page) === page);
     }});
-    // Defer viewers so layout has sizes
-    requestAnimationFrame(() => {{
-      render2dVisible();
-      render3dVisible();
-    }});
+    requestAnimationFrame(() => render3dVisible());
   }}
 
   function buildPager() {{
@@ -439,6 +502,7 @@ def generate_report(
     title: str = "QM9 difficult cases — results",
 ) -> Path:
     rows = load_results(Path(input_path))
+    rows = enrich_with_2d(rows)
     html_text = build_html(rows, page_size=page_size, title=title)
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
