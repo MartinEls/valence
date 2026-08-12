@@ -62,6 +62,16 @@ uv run valence -i qm9_unstable.csv -o output/results.jsonl
 uv run python -m valence.pipeline -i qm9_unstable.csv -o output/results.jsonl
 ```
 
+## HTML report
+
+Interactive table (SMILES, 2D drawing, openbabel 3D, xtb-optimized 3D; InChI on hover).
+Paginates every 100 rows.
+
+```bash
+uv run valence-report -i output/results.jsonl -o output/results.html
+# then open output/results.html in a browser (needs network for 3Dmol / SmilesDrawer CDNs)
+```
+
 ## Output (JSONL)
 
 One JSON object per input line. Example success:

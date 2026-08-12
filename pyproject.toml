@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 valence = "valence.pipeline:main"
+valence-report = "valence.report:main"
 
 [build-system]
 requires = ["uv_build>=0.10.7,<0.11.0"]

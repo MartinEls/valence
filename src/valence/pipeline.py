@@ -14,6 +14,22 @@ from prefect.futures import wait
 from valence.chem import MoleculeResult, process_molecule
 
 
+def _error_row(identifier: str, smiles: str, error: str) -> dict:
+    return {
+        "identifier": identifier,
+        "smiles": smiles,
+        "error": error,
+        "obabel_geometry": None,
+        "optimized_geometry": None,
+        "energy": None,
+        "equivalent_obabel": None,
+        "equivalent_xtb": None,
+        "inchi_start": None,
+        "inchi_obabel": None,
+        "inchi_xtb": None,
+    }
+
+
 @task(name="load-smiles-table", retries=0)
 def load_smiles_table(input_path: str) -> list[dict[str, str]]:
     """
@@ -50,18 +66,7 @@ def process_molecule_task(identifier: str, smiles: str) -> dict:
         result: MoleculeResult = process_molecule(identifier, smiles)
         return result.to_json_row()
     except Exception as e:  # noqa: BLE001 — never fail the flow on one molecule
-        return {
-            "identifier": identifier,
-            "smiles": smiles,
-            "error": f"unexpected: {type(e).__name__}: {e}",
-            "optimized_geometry": None,
-            "energy": None,
-            "equivalent_obabel": None,
-            "equivalent_xtb": None,
-            "inchi_start": None,
-            "inchi_obabel": None,
-            "inchi_xtb": None,
-        }
+        return _error_row(identifier, smiles, f"unexpected: {type(e).__name__}: {e}")
 
 
 @task(name="write-jsonl", retries=1)
@@ -106,32 +111,14 @@ def qm9_difficult_cases(
             rows.append(f.result(raise_on_failure=False))
             # Prefect may return a Failed state object when raise_on_failure=False
             if not isinstance(rows[-1], dict):
-                rows[-1] = {
-                    "identifier": e["identifier"],
-                    "smiles": e["smiles"],
-                    "error": f"task failed: {rows[-1]}",
-                    "optimized_geometry": None,
-                    "energy": None,
-                    "equivalent_obabel": None,
-                    "equivalent_xtb": None,
-                    "inchi_start": None,
-                    "inchi_obabel": None,
-                    "inchi_xtb": None,
-                }
+                rows[-1] = _error_row(e["identifier"], e["smiles"], f"task failed: {rows[-1]}")
         except Exception as exc:  # noqa: BLE001
             rows.append(
-                {
-                    "identifier": e["identifier"],
-                    "smiles": e["smiles"],
-                    "error": f"task failed: {type(exc).__name__}: {exc}",
-                    "optimized_geometry": None,
-                    "energy": None,
-                    "equivalent_obabel": None,
-                    "equivalent_xtb": None,
-                    "inchi_start": None,
-                    "inchi_obabel": None,
-                    "inchi_xtb": None,
-                }
+                _error_row(
+                    e["identifier"],
+                    e["smiles"],
+                    f"task failed: {type(exc).__name__}: {exc}",
+                )
             )
 
     out = write_jsonl(rows, output_path)

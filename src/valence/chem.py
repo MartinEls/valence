@@ -193,6 +193,7 @@ class MoleculeResult:
     identifier: str
     smiles: str
     error: str | None = None
+    obabel_geometry: str | None = None
     optimized_geometry: str | None = None
     energy: float | None = None
     inchi_start: str | None = None
@@ -203,25 +204,20 @@ class MoleculeResult:
     extras: dict = field(default_factory=dict)
 
     def to_json_row(self) -> dict:
-        """JSONL row per README: identifier, error, and geometry/energy on success."""
-        row: dict = {
+        """JSONL row: identifier, error, geometries, energy, InChI diagnostics."""
+        return {
             "identifier": self.identifier,
             "smiles": self.smiles,
             "error": self.error,
+            "obabel_geometry": self.obabel_geometry,
+            "optimized_geometry": self.optimized_geometry,
+            "energy": self.energy,
+            "equivalent_obabel": self.equivalent_obabel,
+            "equivalent_xtb": self.equivalent_xtb,
+            "inchi_start": self.inchi_start,
+            "inchi_obabel": self.inchi_obabel,
+            "inchi_xtb": self.inchi_xtb,
         }
-        if self.error is None:
-            row["optimized_geometry"] = self.optimized_geometry
-            row["energy"] = self.energy
-        else:
-            row["optimized_geometry"] = self.optimized_geometry
-            row["energy"] = self.energy
-        # Useful diagnostics (still one line per entry)
-        row["equivalent_obabel"] = self.equivalent_obabel
-        row["equivalent_xtb"] = self.equivalent_xtb
-        row["inchi_start"] = self.inchi_start
-        row["inchi_obabel"] = self.inchi_obabel
-        row["inchi_xtb"] = self.inchi_xtb
-        return row
 
 
 def process_molecule(identifier: str, smiles: str) -> MoleculeResult:
@@ -263,6 +259,8 @@ def _process_molecule_inner(
             result.error = err
             return result
 
+        result.obabel_geometry = xyz_path.read_text(encoding="utf-8", errors="replace")
+
         obabel_inchi, err = structure_to_inchi(xyz_path, obabel=obabel)
         if err:
             result.error = err
@@ -283,17 +281,16 @@ def _process_molecule_inner(
             return result
 
         assert opt_xyz is not None
+        result.optimized_geometry = opt_xyz.read_text(encoding="utf-8", errors="replace")
+        result.energy = energy
+
         xtb_inchi, err = structure_to_inchi(opt_xyz, obabel=obabel)
         if err:
             result.error = err
-            result.optimized_geometry = opt_xyz.read_text(encoding="utf-8", errors="replace")
-            result.energy = energy
             return result
 
         result.inchi_xtb = xtb_inchi
         result.equivalent_xtb = _inchi_equivalent(start_inchi, xtb_inchi)
-        result.optimized_geometry = opt_xyz.read_text(encoding="utf-8", errors="replace")
-        result.energy = energy
 
         if not result.equivalent_xtb:
             result.error = (
