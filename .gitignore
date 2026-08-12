@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Pipeline outputs and local tool binaries
+# output/
+bin/xtb
+*.xyz
+charges
+wbo
+xtbrestart
+xtbopt.*
+xtbtopo.*
+.prefect/

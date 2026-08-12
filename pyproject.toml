@@ -1,16 +1,19 @@
 [project]
 name = "valence"
 version = "0.1.0"
-description = "Add your description here"
+description = "Prefect pipeline for QM9 difficult cases: SMILES → 3D (obabel) → xtb optimization"
 readme = "README.md"
 authors = [
     { name = "Martin Elstner", email = "martin@elstner.dev" }
 ]
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "polars>=1.0",
+    "prefect>=3.0",
+]
 
 [project.scripts]
-valence = "valence:main"
+valence = "valence.pipeline:main"
 
 [build-system]
 requires = ["uv_build>=0.10.7,<0.11.0"]
